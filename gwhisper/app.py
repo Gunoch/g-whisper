@@ -41,11 +41,11 @@ class GWhisperApp:
         self._set_status("idle")
         print("Pronto!")
 
-    def _set_status(self, status):
+    def _set_status(self, status, text=""):
         self.status = status
         if self._status_callback:
             try:
-                self._status_callback(status, self.mode)
+                self._status_callback(status, self.mode, text)
             except Exception as e:
                 print(f"[!] Erro no status callback: {e}")
 
@@ -128,9 +128,10 @@ class GWhisperApp:
                 )
             except Exception as e:
                 print(f"[!] Erro ao inserir texto: {e}")
+            self._set_status("done", text=text)
         else:
             print("[x] Nenhum texto reconhecido")
-        self._set_status("idle")
+            self._set_status("idle")
 
     # -- Hands-free --
 
