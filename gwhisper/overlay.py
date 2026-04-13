@@ -60,8 +60,8 @@ TEXT_COLOR_DIM = QColor(160, 160, 165)
 DRAG_THRESHOLD = 5  # pixels — click vs drag
 
 
-def _enable_acrylic(hwnd):
-    """Apply Windows 11 DWM Acrylic + rounded corners + dark mode."""
+def _enable_dark_mode(hwnd):
+    """Apply DWM immersive dark mode (harmless if Win10/older)."""
     try:
         dwmapi = ctypes.WinDLL("dwmapi")
         dark = ctypes.c_int(1)
@@ -69,18 +69,8 @@ def _enable_acrylic(hwnd):
             ctypes.wintypes.HWND(hwnd), 20,
             ctypes.byref(dark), ctypes.sizeof(dark),
         )
-        round_pref = ctypes.c_int(2)
-        dwmapi.DwmSetWindowAttribute(
-            ctypes.wintypes.HWND(hwnd), 33,
-            ctypes.byref(round_pref), ctypes.sizeof(round_pref),
-        )
-        backdrop = ctypes.c_int(3)
-        dwmapi.DwmSetWindowAttribute(
-            ctypes.wintypes.HWND(hwnd), 38,
-            ctypes.byref(backdrop), ctypes.sizeof(backdrop),
-        )
-    except Exception as e:
-        print(f"[overlay] DWM acrylic setup failed: {e}")
+    except Exception:
+        pass
 
 
 class _Bridge(QObject):
@@ -98,6 +88,7 @@ class PillWidget(QWidget):
             | Qt.WindowType.Tool,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedSize(PILL_WIDTH, PILL_HEIGHT)
         self.setMouseTracking(True)
         self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -145,7 +136,7 @@ class PillWidget(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         hwnd = int(self.winId())
-        _enable_acrylic(hwnd)
+        _enable_dark_mode(hwnd)
 
     def _position_on_screen(self):
         screen = QApplication.primaryScreen().geometry()
@@ -234,21 +225,24 @@ class PillWidget(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        rect = self.rect()
+        rect = self.rect().adjusted(0, 0, -1, -1)
+        radius = PILL_HEIGHT / 2
+
         if self._status == "idle":
             bg = PILL_BG_HOVER if self._hover else PILL_BG_IDLE
         else:
             bg = PILL_BG
-        p.fillRect(rect, bg)
+
+        # Pill-shaped fill (true full-radius round)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(bg))
+        p.drawRoundedRect(rect, radius, radius)
 
         # Hairline border
-        border_alpha = 30 if self._hover and self._status == "idle" else 18
+        border_alpha = 35 if self._hover and self._status == "idle" else 22
         p.setPen(QPen(QColor(255, 255, 255, border_alpha), 1))
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawRoundedRect(
-            rect.adjusted(0, 0, -1, -1),
-            PILL_HEIGHT / 2 - 1, PILL_HEIGHT / 2 - 1,
-        )
+        p.drawRoundedRect(rect, radius, radius)
 
         indicator_rect = QRect(20, 10, 40, PILL_HEIGHT - 20)
         self._paint_indicator(p, indicator_rect)
