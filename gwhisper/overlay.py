@@ -80,8 +80,12 @@ class _Bridge(QObject):
     destroy_signal = pyqtSignal()
 
 
+CLOSE_BTN_SIZE = 20
+CLOSE_BTN_MARGIN = 10
+
+
 class PillWidget(QWidget):
-    def __init__(self, on_click=None):
+    def __init__(self, on_click=None, on_close=None):
         super().__init__(
             None,
             Qt.WindowType.FramelessWindowHint
@@ -101,7 +105,9 @@ class PillWidget(QWidget):
         self._bars = [0.0] * 5
         self._pulse_phase = 0.0
         self._on_click = on_click
+        self._on_close = on_close
         self._hover = False
+        self._close_hover = False
         self._drag_start = None
         self._was_dragging = False
 
@@ -182,12 +188,20 @@ class PillWidget(QWidget):
 
     # -- mouse events --
 
+    def _close_btn_rect(self):
+        return QRect(
+            PILL_WIDTH - CLOSE_BTN_SIZE - CLOSE_BTN_MARGIN,
+            (PILL_HEIGHT - CLOSE_BTN_SIZE) // 2,
+            CLOSE_BTN_SIZE, CLOSE_BTN_SIZE,
+        )
+
     def enterEvent(self, event):
         self._hover = True
         self.update()
 
     def leaveEvent(self, event):
         self._hover = False
+        self._close_hover = False
         self.update()
 
     def mousePressEvent(self, event):
@@ -196,6 +210,13 @@ class PillWidget(QWidget):
             self._was_dragging = False
 
     def mouseMoveEvent(self, event):
+        # Close button hover detection
+        pos = event.position().toPoint()
+        was_close_hover = self._close_hover
+        self._close_hover = self._close_btn_rect().contains(pos)
+        if was_close_hover != self._close_hover:
+            self.update()
+
         if event.buttons() & Qt.MouseButton.LeftButton and self._drag_start:
             new_pos = event.globalPosition().toPoint() - self._drag_start
             delta = (new_pos - self.pos()).manhattanLength()
@@ -213,6 +234,14 @@ class PillWidget(QWidget):
             self._drag_start = None
             return
         self._drag_start = None
+        # Close button takes priority
+        if self._close_btn_rect().contains(event.position().toPoint()):
+            if self._on_close:
+                try:
+                    self._on_close()
+                except Exception as e:
+                    print(f"[overlay] close handler error: {e}")
+            return
         if self._on_click:
             try:
                 self._on_click(self._status)
@@ -268,9 +297,11 @@ class PillWidget(QWidget):
             p.setFont(self._font)
             p.setPen(QPen(TEXT_COLOR))
 
+        # Reserve space on right for close button
+        right_reserved = CLOSE_BTN_SIZE + CLOSE_BTN_MARGIN + 8
         label_rect = QRect(
             indicator_rect.right() + 10, 0,
-            PILL_WIDTH - indicator_rect.right() - 30, PILL_HEIGHT,
+            PILL_WIDTH - indicator_rect.right() - right_reserved - 4, PILL_HEIGHT,
         )
         align = Qt.AlignmentFlag.AlignVCenter
         if self._status == "done":
@@ -285,6 +316,10 @@ class PillWidget(QWidget):
             align |= Qt.AlignmentFlag.AlignRight
             text = self._label_text
         p.drawText(label_rect, align, text)
+
+        # Close button — only visible on hover
+        if self._hover:
+            self._paint_close_btn(p)
 
     def _paint_indicator(self, p, rect):
         if self._status == "idle":
@@ -341,6 +376,26 @@ class PillWidget(QWidget):
         p.setBrush(QBrush(self._accent))
         p.drawEllipse(cx - size, cy - size, size * 2, size * 2)
 
+    def _paint_close_btn(self, p):
+        rect = self._close_btn_rect()
+        if self._close_hover:
+            bg = QColor(220, 60, 60, 200)
+            stroke = QColor(255, 255, 255, 240)
+        else:
+            bg = QColor(255, 255, 255, 25)
+            stroke = QColor(220, 220, 230, 180)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(bg))
+        p.drawEllipse(rect)
+        # Draw the X
+        pen = QPen(stroke, 1.6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        cx, cy = rect.center().x(), rect.center().y()
+        d = 4
+        p.drawLine(cx - d, cy - d, cx + d, cy + d)
+        p.drawLine(cx - d, cy + d, cx + d, cy - d)
+
     def _paint_check(self, p, rect):
         cx, cy = rect.center().x(), rect.center().y()
         p.setPen(Qt.PenStyle.NoPen)
@@ -357,9 +412,9 @@ class PillWidget(QWidget):
 class RecordingOverlay:
     """Thread-safe facade. Construct on UI thread; call from any thread."""
 
-    def __init__(self, on_click=None):
+    def __init__(self, on_click=None, on_close=None):
         self._bridge = _Bridge()
-        self._pill = PillWidget(on_click=on_click)
+        self._pill = PillWidget(on_click=on_click, on_close=on_close)
         self._bridge.show_signal.connect(self._pill.show_state)
         self._bridge.level_signal.connect(self._pill.set_level)
         self._bridge.destroy_signal.connect(self._pill.close)

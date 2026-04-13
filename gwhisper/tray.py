@@ -226,7 +226,10 @@ class TrayUI:
         self.qt_app.setQuitOnLastWindowClosed(False)
 
         # Overlay widget (created on main thread, controlled via signals)
-        self.overlay = RecordingOverlay(on_click=self._on_overlay_click)
+        self.overlay = RecordingOverlay(
+            on_click=self._on_overlay_click,
+            on_close=lambda: self._on_quit(None, None),
+        )
 
         # Tray icon in detached thread
         self.icon = pystray.Icon(
