@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "g-whisper"
+version = "0.1.0"
+description = "Local voice dictation system using Whisper"
+requires-python = ">=3.10"
+dependencies = [
+    "faster-whisper>=1.0.0",
+    "sounddevice>=0.4.6",
+    "keyboard>=0.13.5",
+    "pyperclip>=1.8.0",
+    "pyyaml>=6.0",
+    "numpy>=1.24.0",
+    "pystray>=0.19.5",
+    "pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+vad = [
+    "torch>=2.0.0",
+    "silero-vad>=5.0",
+]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.scripts]
+g-whisper = "gwhisper.app:main"
+g-whisper-tray = "gwhisper.tray:main"
+
+[tool.setuptools.packages.find]
+include = ["gwhisper*"]

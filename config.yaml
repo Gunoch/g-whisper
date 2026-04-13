@@ -1,0 +1,27 @@
+audio:
+  sample_rate: 16000
+  channels: 1
+  block_size: 512
+  device: null
+
+vad:
+  threshold: 0.5
+  min_silence_duration_ms: 500
+  speech_pad_ms: 200
+  min_speech_duration_ms: 250
+
+transcriber:
+  model_size: "base"
+  device: "cpu"
+  compute_type: "int8"
+  language: "pt"
+  beam_size: 5
+
+hotkeys:
+  push_to_talk: "f9"
+  toggle_mode: "ctrl+shift+m"
+  quit: "ctrl+shift+q"
+
+output:
+  method: "clipboard"
+  add_trailing_space: true
