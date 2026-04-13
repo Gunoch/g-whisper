@@ -24,6 +24,7 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QColor, QPainter, QBrush, QFont, QFontDatabase, QPen, QCursor,
+    QPainterPath, QRegion, QPolygon,
 )
 from PyQt6.QtWidgets import QApplication, QWidget
 
@@ -137,6 +138,18 @@ class PillWidget(QWidget):
         super().showEvent(event)
         hwnd = int(self.winId())
         _enable_dark_mode(hwnd)
+        self._apply_pill_mask()
+
+    def _apply_pill_mask(self):
+        """Mask the window to a pill shape so the OS shadow and hit-test
+        follow the curve, not the rectangular HWND bounds."""
+        path = QPainterPath()
+        path.addRoundedRect(
+            0, 0, float(self.width()), float(self.height()),
+            PILL_HEIGHT / 2, PILL_HEIGHT / 2,
+        )
+        polygon = path.toFillPolygon().toPolygon()
+        self.setMask(QRegion(polygon))
 
     def _position_on_screen(self):
         screen = QApplication.primaryScreen().geometry()
