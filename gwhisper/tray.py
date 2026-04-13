@@ -1,12 +1,12 @@
-"""System tray + floating overlay UI for g-whisper."""
+"""System tray + floating overlay UI for g-whisper (PyQt6 version)."""
 import os
 import sys
 import threading
-import tkinter as tk
 
 import pyperclip
 import pystray
 import sounddevice as sd
+from PyQt6.QtWidgets import QApplication
 
 from gwhisper.app import GWhisperApp
 from gwhisper.overlay import RecordingOverlay
@@ -22,7 +22,6 @@ STATUS_LABELS = {
     "done": "Pronto",
     "hands_free_listening": "Hands-free (ouvindo)",
 }
-
 
 ICON_PATH = os.path.join("assets", "icon.ico")
 LAUNCHER_BAT = "g-whisper.bat"
@@ -43,10 +42,10 @@ def _list_input_devices():
 class TrayUI:
     def __init__(self, config_path="config.yaml"):
         self.config_path = config_path
+        self.qt_app = None
         self.icon = None
         self.app = None
         self.overlay = None
-        self.root = None
         self._current_device = None
 
     # -- callbacks from app --
@@ -102,11 +101,8 @@ class TrayUI:
             self.overlay.destroy()
         if self.icon:
             self.icon.stop()
-        if self.root:
-            try:
-                self.root.after(0, self.root.quit)
-            except Exception:
-                pass
+        if self.qt_app:
+            self.qt_app.quit()
         os._exit(0)
 
     def _on_toggle_startup(self, icon, item):
@@ -197,8 +193,6 @@ class TrayUI:
             pystray.MenuItem("Sair", self._on_quit),
         )
 
-    # -- init --
-
     def _init_app(self):
         try:
             self.app = GWhisperApp(
@@ -209,7 +203,6 @@ class TrayUI:
             self._current_device = self.app.audio.device
             self.app.start()
             if self.icon:
-                # Rebuild menu now that app (and history) exist
                 self.icon.menu = self._build_menu()
                 self.icon.update_menu()
         except Exception as e:
@@ -219,17 +212,20 @@ class TrayUI:
                 self.overlay.show("error", text=str(e)[:40])
 
     def run(self):
-        # Ensure .ico exists (for shortcuts, not for tkinter window)
         if not os.path.exists(ICON_PATH):
             try:
                 make_ico_file(ICON_PATH)
             except Exception as e:
                 print(f"[!] Erro ao gerar .ico: {e}")
 
-        self.root = tk.Tk()
-        self.root.withdraw()
-        self.overlay = RecordingOverlay(self.root, on_click=self._on_overlay_click)
+        # Qt application on main thread
+        self.qt_app = QApplication(sys.argv)
+        self.qt_app.setQuitOnLastWindowClosed(False)
 
+        # Overlay widget (created on main thread, controlled via signals)
+        self.overlay = RecordingOverlay(on_click=self._on_overlay_click)
+
+        # Tray icon in detached thread
         self.icon = pystray.Icon(
             "g-whisper",
             icon=ICONS["loading"],
@@ -238,16 +234,17 @@ class TrayUI:
         )
         self.icon.run_detached()
 
+        # App initialization in background
         threading.Thread(target=self._init_app, daemon=True).start()
 
+        # Block on Qt event loop
         try:
-            self.root.mainloop()
+            self.qt_app.exec()
         except KeyboardInterrupt:
             self._on_quit(None, None)
 
 
 def main():
-    # Single-instance guard
     lock = single_instance.SingleInstance()
     if not lock.acquire():
         notify.notify("g-whisper", "Já está em execução (ícone na bandeja)", ICON_PATH)

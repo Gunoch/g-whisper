@@ -40,7 +40,7 @@ Cor do ícone indica status:
 - Verde: hands-free ouvindo
 
 ### Pill flutuante no rodapé
-Durante gravação mostra 5 barrinhas animadas com o volume real do mic. Clicar na pill durante gravação **cancela** (não transcreve). Ao terminar, mostra ✓ + o texto transcrito por 2s antes de sumir.
+Renderizada com **PyQt6 + Windows 11 Acrylic backdrop** (glassmorphism nativo via DWM). Cantos verdadeiramente arredondados, sombra suave, fade in/out em 250ms com easing `OutCubic`. Tipografia **Inter** (ou Segoe UI Variable como fallback) com tracking tight (-2%). Durante gravação mostra 5 barrinhas animadas com o volume real do mic. Clicar na pill durante gravação **cancela** (não transcreve). Ao terminar, mostra ✓ + o texto transcrito por 2s antes de sumir.
 
 ### Outras formas de executar
 - **Debug** (com console visível): `g-whisper-debug.bat`.
