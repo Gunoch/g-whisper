@@ -79,9 +79,12 @@ class TrayUI:
         if self.overlay is not None:
             self.overlay.set_level(level)
 
-    def _on_overlay_click(self):
-        if self.app:
-            self.app.cancel_recording()
+    def _on_overlay_click(self, current_status="idle"):
+        if not self.app:
+            return
+        # click_to_record toggles: idle → start, recording → stop+transcribe.
+        # Hands-free ignores click; transcribing/loading also ignore.
+        self.app.click_to_record(current_status)
 
     # -- tray menu actions --
 

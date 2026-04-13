@@ -1,14 +1,16 @@
-"""Floating recording overlay (Wispr Flow / Raycast style) with PyQt6.
+"""Always-visible floating pill (Wispr Flow / Raycast style) with PyQt6.
 
-Uses Windows 11 DWM Acrylic backdrop for real glassmorphism — the window
-itself IS the pill (no transparent padding around it), and DWM provides
-the rounded corners + drop shadow + blur natively.
+The pill stays at the bottom of the screen at all times. Click it to
+start/stop recording (toggle), or use F9 hotkey. Drag to reposition;
+position is remembered via QSettings.
 
 States:
-  - recording: 5 animated level bars driven by mic RMS
-  - transcribing: pulsing dot
-  - done: green check + transcribed text (auto-hides after 2s)
-  - hands_free: level bars in green, "Ouvindo"
+  - idle: dim pill, mic icon + "Pronto" hint (clickable to start)
+  - hover: idle pill brightens
+  - recording: red, 5 animated level bars
+  - transcribing: blue pulsing dot
+  - done: green check + transcribed text (2s → returns to idle)
+  - hands_free: green, level bars, "Ouvindo"
   - loading, error
 """
 import ctypes
@@ -18,19 +20,20 @@ import random
 
 from PyQt6.QtCore import (
     Qt, QTimer, QPropertyAnimation, QEasingCurve, pyqtSignal, QObject,
-    QRect,
+    QRect, QPoint, QSettings,
 )
 from PyQt6.QtGui import (
-    QColor, QPainter, QBrush, QFont, QFontDatabase, QPen,
+    QColor, QPainter, QBrush, QFont, QFontDatabase, QPen, QCursor,
 )
 from PyQt6.QtWidgets import QApplication, QWidget
 
 
 PILL_WIDTH = 300
 PILL_HEIGHT = 56
-MARGIN_BOTTOM = 80
+DEFAULT_MARGIN_BOTTOM = 80
 
 ACCENTS = {
+    "idle": QColor("#666666"),
     "recording": QColor("#e53935"),
     "transcribing": QColor("#1e88e5"),
     "hands_free": QColor("#43a047"),
@@ -40,6 +43,7 @@ ACCENTS = {
 }
 
 LABELS = {
+    "idle": "F9 ou clique para gravar",
     "recording": "Gravando",
     "transcribing": "Transcrevendo…",
     "hands_free": "Ouvindo",
@@ -49,27 +53,27 @@ LABELS = {
 }
 
 PILL_BG = QColor(26, 26, 26, 240)
+PILL_BG_IDLE = QColor(20, 20, 20, 200)
+PILL_BG_HOVER = QColor(35, 35, 35, 240)
 TEXT_COLOR = QColor(240, 240, 240)
+TEXT_COLOR_DIM = QColor(160, 160, 165)
+DRAG_THRESHOLD = 5  # pixels — click vs drag
 
 
 def _enable_acrylic(hwnd):
-    """Apply Windows 11 DWM Acrylic backdrop + rounded corners + dark mode.
-    Safe no-op on older Windows or if calls fail."""
+    """Apply Windows 11 DWM Acrylic + rounded corners + dark mode."""
     try:
         dwmapi = ctypes.WinDLL("dwmapi")
-        # DWMWA_USE_IMMERSIVE_DARK_MODE = 20 (must come first)
         dark = ctypes.c_int(1)
         dwmapi.DwmSetWindowAttribute(
             ctypes.wintypes.HWND(hwnd), 20,
             ctypes.byref(dark), ctypes.sizeof(dark),
         )
-        # DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2
         round_pref = ctypes.c_int(2)
         dwmapi.DwmSetWindowAttribute(
             ctypes.wintypes.HWND(hwnd), 33,
             ctypes.byref(round_pref), ctypes.sizeof(round_pref),
         )
-        # DWMWA_SYSTEMBACKDROP_TYPE = 38, DWMSBT_TRANSIENTWINDOW = 3 (Acrylic)
         backdrop = ctypes.c_int(3)
         dwmapi.DwmSetWindowAttribute(
             ctypes.wintypes.HWND(hwnd), 38,
@@ -81,7 +85,6 @@ def _enable_acrylic(hwnd):
 
 class _Bridge(QObject):
     show_signal = pyqtSignal(str, str)
-    hide_signal = pyqtSignal()
     level_signal = pyqtSignal(float)
     destroy_signal = pyqtSignal()
 
@@ -96,91 +99,121 @@ class PillWidget(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setFixedSize(PILL_WIDTH, PILL_HEIGHT)
-        self.setWindowOpacity(0.0)
+        self.setMouseTracking(True)
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
 
         self._status = "idle"
         self._label_text = ""
-        self._accent = ACCENTS["hands_free"]
+        self._accent = ACCENTS["idle"]
         self._level = 0.0
         self._bars = [0.0] * 5
         self._pulse_phase = 0.0
         self._on_click = on_click
+        self._hover = False
+        self._drag_start = None
+        self._was_dragging = False
 
-        # Fade animation
-        self._fade = QPropertyAnimation(self, b"windowOpacity")
-        self._fade.setDuration(220)
-        self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self._fade.finished.connect(self._on_fade_finished)
+        self._settings = QSettings("g-whisper", "overlay")
 
-        # Animation tick (~30fps)
         self._tick = QTimer(self)
         self._tick.setInterval(33)
         self._tick.timeout.connect(self._on_tick)
         self._tick.start()
 
-        # Auto-hide timer (for "done" state)
-        self._auto_hide = QTimer(self)
-        self._auto_hide.setSingleShot(True)
-        self._auto_hide.timeout.connect(self.hide_overlay)
+        self._auto_revert = QTimer(self)
+        self._auto_revert.setSingleShot(True)
+        self._auto_revert.timeout.connect(lambda: self.show_state("idle"))
 
         self._position_on_screen()
         self._setup_font()
 
     def _setup_font(self):
         self._font = QFont()
+        self._font_idle = QFont()
         for family in ("Inter", "Segoe UI Variable", "Segoe UI", "Arial"):
             if family in QFontDatabase.families():
                 self._font.setFamily(family)
+                self._font_idle.setFamily(family)
                 break
         self._font.setPixelSize(14)
         self._font.setWeight(QFont.Weight.Medium)
         self._font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 98)
+        self._font_idle.setPixelSize(12)
+        self._font_idle.setWeight(QFont.Weight.Normal)
+        self._font_idle.setLetterSpacing(QFont.SpacingType.PercentageSpacing, 100)
 
     def showEvent(self, event):
         super().showEvent(event)
-        # Apply DWM tweaks once HWND exists
         hwnd = int(self.winId())
         _enable_acrylic(hwnd)
 
     def _position_on_screen(self):
         screen = QApplication.primaryScreen().geometry()
-        x = (screen.width() - PILL_WIDTH) // 2
-        y = screen.height() - PILL_HEIGHT - MARGIN_BOTTOM
+        saved_x = self._settings.value("x", -1, int)
+        saved_y = self._settings.value("y", -1, int)
+        if saved_x >= 0 and saved_y >= 0:
+            x = max(0, min(saved_x, screen.width() - PILL_WIDTH))
+            y = max(0, min(saved_y, screen.height() - PILL_HEIGHT))
+        else:
+            x = (screen.width() - PILL_WIDTH) // 2
+            y = screen.height() - PILL_HEIGHT - DEFAULT_MARGIN_BOTTOM
         self.move(x, y)
-
-    def _on_fade_finished(self):
-        if self.windowOpacity() <= 0.01:
-            self.hide()
 
     # -- slots (UI thread) --
 
     def show_state(self, status, text=""):
-        self._auto_hide.stop()
+        self._auto_revert.stop()
         self._status = status
         self._label_text = LABELS.get(status, "") if status != "done" else text
         self._accent = ACCENTS.get(status, QColor("#888888"))
         if not self.isVisible():
             self.show()
             self.raise_()
-        self._fade.stop()
-        self._fade.setStartValue(self.windowOpacity())
-        self._fade.setEndValue(1.0)
-        self._fade.start()
         if status == "done":
-            self._auto_hide.start(2000)
+            self._auto_revert.start(2200)
         self.update()
-
-    def hide_overlay(self):
-        self._auto_hide.stop()
-        if not self.isVisible():
-            return
-        self._fade.stop()
-        self._fade.setStartValue(self.windowOpacity())
-        self._fade.setEndValue(0.0)
-        self._fade.start()
 
     def set_level(self, level):
         self._level = max(0.0, min(1.0, float(level)))
+
+    # -- mouse events --
+
+    def enterEvent(self, event):
+        self._hover = True
+        self.update()
+
+    def leaveEvent(self, event):
+        self._hover = False
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start = event.globalPosition().toPoint() - self.pos()
+            self._was_dragging = False
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.MouseButton.LeftButton and self._drag_start:
+            new_pos = event.globalPosition().toPoint() - self._drag_start
+            delta = (new_pos - self.pos()).manhattanLength()
+            if delta > DRAG_THRESHOLD or self._was_dragging:
+                self._was_dragging = True
+                self.move(new_pos)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        if self._was_dragging:
+            self._settings.setValue("x", self.x())
+            self._settings.setValue("y", self.y())
+            self._was_dragging = False
+            self._drag_start = None
+            return
+        self._drag_start = None
+        if self._on_click:
+            try:
+                self._on_click(self._status)
+            except Exception as e:
+                print(f"[overlay] click handler error: {e}")
 
     # -- animation tick --
 
@@ -201,25 +234,33 @@ class PillWidget(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # Fill the whole window with the pill background. DWM rounds corners.
         rect = self.rect()
-        p.fillRect(rect, PILL_BG)
+        if self._status == "idle":
+            bg = PILL_BG_HOVER if self._hover else PILL_BG_IDLE
+        else:
+            bg = PILL_BG
+        p.fillRect(rect, bg)
 
-        # Hairline inner border for definition
-        p.setPen(QPen(QColor(255, 255, 255, 18), 1))
+        # Hairline border
+        border_alpha = 30 if self._hover and self._status == "idle" else 18
+        p.setPen(QPen(QColor(255, 255, 255, border_alpha), 1))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawRoundedRect(
             rect.adjusted(0, 0, -1, -1),
             PILL_HEIGHT / 2 - 1, PILL_HEIGHT / 2 - 1,
         )
 
-        # Left indicator area
         indicator_rect = QRect(20, 10, 40, PILL_HEIGHT - 20)
         self._paint_indicator(p, indicator_rect)
 
         # Label
-        p.setFont(self._font)
-        p.setPen(QPen(TEXT_COLOR))
+        if self._status == "idle":
+            p.setFont(self._font_idle)
+            p.setPen(QPen(TEXT_COLOR if self._hover else TEXT_COLOR_DIM))
+        else:
+            p.setFont(self._font)
+            p.setPen(QPen(TEXT_COLOR))
+
         label_rect = QRect(
             indicator_rect.right() + 10, 0,
             PILL_WIDTH - indicator_rect.right() - 30, PILL_HEIGHT,
@@ -230,18 +271,40 @@ class PillWidget(QWidget):
             text = self._label_text or ""
             metrics = p.fontMetrics()
             text = metrics.elidedText(text, Qt.TextElideMode.ElideRight, label_rect.width())
+        elif self._status == "idle":
+            align |= Qt.AlignmentFlag.AlignRight
+            text = self._label_text
         else:
             align |= Qt.AlignmentFlag.AlignRight
             text = self._label_text
         p.drawText(label_rect, align, text)
 
     def _paint_indicator(self, p, rect):
-        if self._status in ("recording", "hands_free"):
+        if self._status == "idle":
+            self._paint_idle_mic(p, rect)
+        elif self._status in ("recording", "hands_free"):
             self._paint_bars(p, rect)
         elif self._status in ("transcribing", "loading", "error"):
             self._paint_dot(p, rect)
         elif self._status == "done":
             self._paint_check(p, rect)
+
+    def _paint_idle_mic(self, p, rect):
+        # Small white mic icon, dimmer when not hovered
+        color = QColor(220, 220, 230) if self._hover else QColor(140, 140, 150)
+        cx, cy = rect.center().x(), rect.center().y()
+        # Capsule body
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(color))
+        p.drawRoundedRect(cx - 4, cy - 10, 8, 16, 4, 4)
+        # Stand arc
+        pen = QPen(color, 2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawArc(cx - 8, cy - 4, 16, 14, 200 * 16, 140 * 16)
+        # Stem
+        p.drawLine(cx, cy + 9, cx, cy + 12)
 
     def _paint_bars(self, p, rect):
         p.setPen(Qt.PenStyle.NoPen)
@@ -263,13 +326,11 @@ class PillWidget(QWidget):
         pulse = 0.7 + 0.3 * math.sin(self._pulse_phase * math.tau)
         size = max(4, int(12 * pulse))
         cx, cy = rect.center().x(), rect.center().y()
-        # Halo
         glow = QColor(self._accent)
         glow.setAlpha(80)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QBrush(glow))
         p.drawEllipse(cx - size - 4, cy - size - 4, (size + 4) * 2, (size + 4) * 2)
-        # Dot
         p.setBrush(QBrush(self._accent))
         p.drawEllipse(cx - size, cy - size, size * 2, size * 2)
 
@@ -285,28 +346,25 @@ class PillWidget(QWidget):
         p.drawLine(cx - 5, cy, cx - 1, cy + 4)
         p.drawLine(cx - 1, cy + 4, cx + 6, cy - 4)
 
-    def mousePressEvent(self, event):
-        if self._status in ("recording", "hands_free") and self._on_click:
-            self._on_click()
-
 
 class RecordingOverlay:
-    """Thread-safe facade. Construct on UI thread; call show/hide/set_level
-    from any thread."""
+    """Thread-safe facade. Construct on UI thread; call from any thread."""
 
     def __init__(self, on_click=None):
         self._bridge = _Bridge()
         self._pill = PillWidget(on_click=on_click)
         self._bridge.show_signal.connect(self._pill.show_state)
-        self._bridge.hide_signal.connect(self._pill.hide_overlay)
         self._bridge.level_signal.connect(self._pill.set_level)
         self._bridge.destroy_signal.connect(self._pill.close)
+        # Show idle state immediately
+        self._pill.show_state("idle")
 
     def show(self, status, text=""):
         self._bridge.show_signal.emit(status, text)
 
     def hide(self):
-        self._bridge.hide_signal.emit()
+        # In always-visible mode, "hide" means revert to idle
+        self._bridge.show_signal.emit("idle", "")
 
     def set_level(self, level):
         self._bridge.level_signal.emit(float(level))

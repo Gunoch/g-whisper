@@ -106,6 +106,15 @@ class GWhisperApp:
                 self._stop_event.set()
             print("[x] Gravação cancelada")
 
+    def click_to_record(self, current_status="idle"):
+        """Click handler from overlay. Toggles record/stop in PTT mode."""
+        if self.mode != "push_to_talk":
+            return
+        if self._recording:
+            self._on_ptt_release()  # stop + transcribe
+        elif not (self._record_thread and self._record_thread.is_alive()):
+            self._on_ptt_press()  # start
+
     def _on_ptt_release(self):
         if not self._recording:
             return
