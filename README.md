@@ -22,20 +22,32 @@ O extra `[vad]` adiciona `torch` e `silero-vad` (necessários para o modo hands-
 
 ## Uso
 
-**Forma recomendada:** double-click em `g-whisper.bat` -- inicia em segundo plano, sem janela de console, aparece um ícone na bandeja do sistema.
+**Forma recomendada:** double-click em `g-whisper.bat` -- inicia em segundo plano, sem janela de console. Aparece um ícone na bandeja do sistema e uma pill flutuante mostra o status quando você está gravando.
 
-- Botão direito no ícone → "Sair" para encerrar
-- Botão direito → "Modo: ..." alterna push-to-talk / hands-free
-- Cor do ícone indica status:
-  - Cinza: idle
-  - Vermelho: gravando
-  - Azul: transcrevendo
-  - Verde: hands-free ouvindo
-  - Amarelo: carregando
+### Ícone da bandeja
+Botão direito abre o menu:
+- **Modo: push-to-talk / hands-free** — alterna entre os modos
+- **Microfone** — submenu com todos os mics detectados, clique para trocar
+- **Histórico** — últimas 10 transcrições, clique para copiar
+- **Iniciar com Windows** — checkbox; quando ativo, cria atalho em `Startup` para o app abrir no boot
+- **Sair** — encerra
 
-**Para debug** (com console visível): double-click em `g-whisper-debug.bat`.
+Cor do ícone indica status:
+- Amarelo: carregando modelo
+- Cinza: idle
+- Vermelho: gravando
+- Azul: transcrevendo
+- Verde: hands-free ouvindo
 
-**Sem tray** (CLI puro): `python run.py`.
+### Pill flutuante no rodapé
+Durante gravação mostra 5 barrinhas animadas com o volume real do mic. Clicar na pill durante gravação **cancela** (não transcreve). Ao terminar, mostra ✓ + o texto transcrito por 2s antes de sumir.
+
+### Outras formas de executar
+- **Debug** (com console visível): `g-whisper-debug.bat`.
+- **Sem tray** (CLI puro): `python run.py`.
+
+### Single-instance
+Se você der double-click duas vezes, o segundo processo detecta que já tem um rodando e fecha silenciosamente (Windows toast avisa).
 
 Na primeira execução, o modelo Whisper é baixado automaticamente (~150MB para o modelo `base`).
 

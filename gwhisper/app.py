@@ -3,22 +3,30 @@ import sys
 import queue
 import threading
 import traceback
+import time
+from collections import deque
+
 import numpy as np
 
 from gwhisper.config import load_config
 from gwhisper.transcriber import Transcriber
-from gwhisper.audio import AudioRecorder
+from gwhisper.audio import AudioRecorder, rms_level
 from gwhisper.hotkeys import HotkeyManager
 from gwhisper.output import type_text
 
 
+HISTORY_MAX = 10
+
+
 class GWhisperApp:
-    def __init__(self, config_path="config.yaml", status_callback=None):
+    def __init__(self, config_path="config.yaml", status_callback=None, level_callback=None):
         self.config = load_config(config_path)
         self.mode = "push_to_talk"
         self.status = "idle"
         self._status_callback = status_callback
+        self._level_callback = level_callback
         self._recording = False
+        self._cancelled = False
         self._stop_event = None
         self._record_thread = None
         self._vad = None
@@ -29,6 +37,7 @@ class GWhisperApp:
         self._vad_thread = None
         self._worker_thread = None
         self._toggle_lock = threading.Lock()
+        self.history = deque(maxlen=HISTORY_MAX)
 
         self._set_status("loading")
         print("Carregando modelo de transcrição (primeiro uso pode baixar ~150MB)...")
@@ -79,6 +88,7 @@ class GWhisperApp:
             print("[!] Aguarde transcrição anterior terminar")
             return
         self._recording = True
+        self._cancelled = False
         self._stop_event = threading.Event()
         print("[*] Gravando...")
         self._set_status("recording")
@@ -86,6 +96,15 @@ class GWhisperApp:
             target=self._record_and_transcribe, daemon=True
         )
         self._record_thread.start()
+
+    def cancel_recording(self):
+        """Cancel current PTT recording without transcribing."""
+        if self._recording:
+            self._cancelled = True
+            self._recording = False
+            if self._stop_event:
+                self._stop_event.set()
+            print("[x] Gravação cancelada")
 
     def _on_ptt_release(self):
         if not self._recording:
@@ -96,10 +115,17 @@ class GWhisperApp:
 
     def _record_and_transcribe(self):
         try:
-            audio_data = self.audio.record_until_released(self._stop_event)
+            audio_data = self.audio.record_until_released(
+                self._stop_event,
+                level_callback=self._level_callback,
+            )
         except Exception as e:
             print(f"[!] Erro na captura de áudio: {e}")
             self._recording = False
+            self._set_status("idle")
+            return
+
+        if self._cancelled:
             self._set_status("idle")
             return
 
@@ -128,10 +154,14 @@ class GWhisperApp:
                 )
             except Exception as e:
                 print(f"[!] Erro ao inserir texto: {e}")
+            self._add_to_history(text)
             self._set_status("done", text=text)
         else:
             print("[x] Nenhum texto reconhecido")
             self._set_status("idle")
+
+    def _add_to_history(self, text):
+        self.history.appendleft((time.time(), text))
 
     # -- Hands-free --
 
@@ -157,10 +187,16 @@ class GWhisperApp:
         def on_audio_chunk(indata, frames, time_info, status):
             if status:
                 print(f"[audio] {status}")
+            chunk = indata[:, 0].copy()
             try:
-                self._audio_queue.put_nowait(indata[:, 0].copy())
+                self._audio_queue.put_nowait(chunk)
             except queue.Full:
                 print("[!] Audio queue cheia, descartando chunk")
+            if self._level_callback and self._vad and self._vad.is_speaking:
+                try:
+                    self._level_callback(rms_level(chunk))
+                except Exception:
+                    pass
 
         # VAD worker: process chunks from audio queue, with ring buffer
         # to ensure exactly chunk_size samples are passed to Silero VAD
@@ -205,6 +241,7 @@ class GWhisperApp:
                     if audio is None:
                         break
                     print("[...] Transcrevendo...")
+                    self._set_status("transcribing")
                     text = self.transcriber.transcribe(audio)
                     if text:
                         print(f"[ok] {text}")
@@ -213,8 +250,11 @@ class GWhisperApp:
                             method=self.config["output"]["method"],
                             add_trailing_space=self.config["output"]["add_trailing_space"],
                         )
+                        self._add_to_history(text)
+                        self._set_status("done", text=text)
                     else:
                         print("[x] Nenhum texto reconhecido")
+                        self._set_status("idle")
                 except Exception:
                     print("[!] Erro no transcription worker:")
                     traceback.print_exc()

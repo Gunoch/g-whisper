@@ -13,3 +13,4 @@ venv/
 *.log
 .vscode/
 .idea/
+assets/preview/
