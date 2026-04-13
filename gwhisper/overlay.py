@@ -1,7 +1,8 @@
 """Floating recording overlay (Wispr Flow / Raycast style) with PyQt6.
 
-Uses Windows 11 DWM Acrylic backdrop for real glassmorphism, plus Qt's
-native signal/slot system for thread-safe updates from the audio thread.
+Uses Windows 11 DWM Acrylic backdrop for real glassmorphism — the window
+itself IS the pill (no transparent padding around it), and DWM provides
+the rounded corners + drop shadow + blur natively.
 
 States:
   - recording: 5 animated level bars driven by mic RMS
@@ -12,27 +13,22 @@ States:
 """
 import ctypes
 import ctypes.wintypes
+import math
 import random
-import sys
 
 from PyQt6.QtCore import (
     Qt, QTimer, QPropertyAnimation, QEasingCurve, pyqtSignal, QObject,
     QRect,
 )
 from PyQt6.QtGui import (
-    QColor, QPainter, QPainterPath, QBrush, QFont, QFontDatabase, QPen,
+    QColor, QPainter, QBrush, QFont, QFontDatabase, QPen,
 )
-from PyQt6.QtWidgets import (
-    QApplication, QWidget, QGraphicsDropShadowEffect,
-)
+from PyQt6.QtWidgets import QApplication, QWidget
 
 
 PILL_WIDTH = 300
 PILL_HEIGHT = 56
 MARGIN_BOTTOM = 80
-CONTAINER_PADDING = 40
-WINDOW_WIDTH = PILL_WIDTH + CONTAINER_PADDING * 2
-WINDOW_HEIGHT = PILL_HEIGHT + CONTAINER_PADDING * 2
 
 ACCENTS = {
     "recording": QColor("#e53935"),
@@ -52,41 +48,38 @@ LABELS = {
     "error": "Erro",
 }
 
-PILL_BG = QColor(26, 26, 26, 235)
+PILL_BG = QColor(26, 26, 26, 240)
 TEXT_COLOR = QColor(240, 240, 240)
 
 
 def _enable_acrylic(hwnd):
-    """Apply Windows 11 DWM Acrylic backdrop to the given HWND.
-
-    Safe no-op on older Windows versions or if the call fails.
-    """
+    """Apply Windows 11 DWM Acrylic backdrop + rounded corners + dark mode.
+    Safe no-op on older Windows or if calls fail."""
     try:
         dwmapi = ctypes.WinDLL("dwmapi")
-        # DWMWA_SYSTEMBACKDROP_TYPE = 38 (Windows 11 22H2+)
-        # DWMSBT_TRANSIENTWINDOW = 3 (Acrylic)
-        value = ctypes.c_int(3)
-        dwmapi.DwmSetWindowAttribute(
-            ctypes.wintypes.HWND(hwnd), 38, ctypes.byref(value), ctypes.sizeof(value)
-        )
-        # DWMWA_WINDOW_CORNER_PREFERENCE = 33
-        # DWMWCP_ROUND = 2
-        round_pref = ctypes.c_int(2)
-        dwmapi.DwmSetWindowAttribute(
-            ctypes.wintypes.HWND(hwnd), 33, ctypes.byref(round_pref), ctypes.sizeof(round_pref)
-        )
-        # DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+        # DWMWA_USE_IMMERSIVE_DARK_MODE = 20 (must come first)
         dark = ctypes.c_int(1)
         dwmapi.DwmSetWindowAttribute(
-            ctypes.wintypes.HWND(hwnd), 20, ctypes.byref(dark), ctypes.sizeof(dark)
+            ctypes.wintypes.HWND(hwnd), 20,
+            ctypes.byref(dark), ctypes.sizeof(dark),
         )
-    except Exception:
-        pass
+        # DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2
+        round_pref = ctypes.c_int(2)
+        dwmapi.DwmSetWindowAttribute(
+            ctypes.wintypes.HWND(hwnd), 33,
+            ctypes.byref(round_pref), ctypes.sizeof(round_pref),
+        )
+        # DWMWA_SYSTEMBACKDROP_TYPE = 38, DWMSBT_TRANSIENTWINDOW = 3 (Acrylic)
+        backdrop = ctypes.c_int(3)
+        dwmapi.DwmSetWindowAttribute(
+            ctypes.wintypes.HWND(hwnd), 38,
+            ctypes.byref(backdrop), ctypes.sizeof(backdrop),
+        )
+    except Exception as e:
+        print(f"[overlay] DWM acrylic setup failed: {e}")
 
 
 class _Bridge(QObject):
-    """Thread-safe bridge: audio-thread callers emit signals, which Qt
-    delivers to slots on the UI thread."""
     show_signal = pyqtSignal(str, str)
     hide_signal = pyqtSignal()
     level_signal = pyqtSignal(float)
@@ -99,16 +92,10 @@ class PillWidget(QWidget):
             None,
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
-            | Qt.WindowType.WindowTransparentForInput
-            if False
-            else Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool,
         )
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        self.setFixedSize(WINDOW_WIDTH, WINDOW_HEIGHT)
+        self.setFixedSize(PILL_WIDTH, PILL_HEIGHT)
         self.setWindowOpacity(0.0)
 
         self._status = "idle"
@@ -119,33 +106,27 @@ class PillWidget(QWidget):
         self._pulse_phase = 0.0
         self._on_click = on_click
 
-        # Drop shadow via graphics effect
-        shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(40)
-        shadow.setOffset(0, 12)
-        shadow.setColor(QColor(0, 0, 0, 180))
-        self.setGraphicsEffect(shadow)
-
         # Fade animation
         self._fade = QPropertyAnimation(self, b"windowOpacity")
-        self._fade.setDuration(250)
+        self._fade.setDuration(220)
         self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._fade.finished.connect(self._on_fade_finished)
 
-        # Animation tick (level decay + pulse + repaint)
+        # Animation tick (~30fps)
         self._tick = QTimer(self)
-        self._tick.setInterval(33)  # ~30fps
+        self._tick.setInterval(33)
         self._tick.timeout.connect(self._on_tick)
         self._tick.start()
 
-        # Auto-hide timer
+        # Auto-hide timer (for "done" state)
         self._auto_hide = QTimer(self)
         self._auto_hide.setSingleShot(True)
         self._auto_hide.timeout.connect(self.hide_overlay)
 
-        # Position at bottom-center of primary screen
         self._position_on_screen()
+        self._setup_font()
 
-        # Font: Inter if available, else Segoe UI Variable, else fallback
+    def _setup_font(self):
         self._font = QFont()
         for family in ("Inter", "Segoe UI Variable", "Segoe UI", "Arial"):
             if family in QFontDatabase.families():
@@ -157,17 +138,21 @@ class PillWidget(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
-        # Apply acrylic after window has native HWND
+        # Apply DWM tweaks once HWND exists
         hwnd = int(self.winId())
         _enable_acrylic(hwnd)
 
     def _position_on_screen(self):
         screen = QApplication.primaryScreen().geometry()
-        x = (screen.width() - WINDOW_WIDTH) // 2
-        y = screen.height() - WINDOW_HEIGHT - MARGIN_BOTTOM + CONTAINER_PADDING
+        x = (screen.width() - PILL_WIDTH) // 2
+        y = screen.height() - PILL_HEIGHT - MARGIN_BOTTOM
         self.move(x, y)
 
-    # -- slots (main thread) --
+    def _on_fade_finished(self):
+        if self.windowOpacity() <= 0.01:
+            self.hide()
+
+    # -- slots (UI thread) --
 
     def show_state(self, status, text=""):
         self._auto_hide.stop()
@@ -187,20 +172,11 @@ class PillWidget(QWidget):
 
     def hide_overlay(self):
         self._auto_hide.stop()
+        if not self.isVisible():
+            return
         self._fade.stop()
         self._fade.setStartValue(self.windowOpacity())
         self._fade.setEndValue(0.0)
-
-        def on_finished():
-            if self.windowOpacity() <= 0.01:
-                self.hide()
-                self._status = "idle"
-
-        try:
-            self._fade.finished.disconnect()
-        except TypeError:
-            pass
-        self._fade.finished.connect(on_finished)
         self._fade.start()
 
     def set_level(self, level):
@@ -209,6 +185,8 @@ class PillWidget(QWidget):
     # -- animation tick --
 
     def _on_tick(self):
+        if not self.isVisible():
+            return
         if self._status in ("recording", "hands_free"):
             for i in range(len(self._bars)):
                 target = self._level * (0.55 + 0.45 * random.random())
@@ -223,44 +201,33 @@ class PillWidget(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        # Pill rectangle centered in the padded window
-        pill_rect = QRect(
-            CONTAINER_PADDING, CONTAINER_PADDING,
-            PILL_WIDTH, PILL_HEIGHT,
-        )
+        # Fill the whole window with the pill background. DWM rounds corners.
+        rect = self.rect()
+        p.fillRect(rect, PILL_BG)
 
-        # Glass pill background with subtle border
-        path = QPainterPath()
-        path.addRoundedRect(
-            pill_rect.x(), pill_rect.y(), pill_rect.width(), pill_rect.height(),
-            PILL_HEIGHT / 2, PILL_HEIGHT / 2,
-        )
-        p.fillPath(path, QBrush(PILL_BG))
-
-        # Hairline border
-        p.setPen(QPen(QColor(255, 255, 255, 20), 1))
+        # Hairline inner border for definition
+        p.setPen(QPen(QColor(255, 255, 255, 18), 1))
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawPath(path)
-
-        # Left indicator
-        indicator_rect = QRect(
-            pill_rect.x() + 20, pill_rect.y() + 10,
-            40, PILL_HEIGHT - 20,
+        p.drawRoundedRect(
+            rect.adjusted(0, 0, -1, -1),
+            PILL_HEIGHT / 2 - 1, PILL_HEIGHT / 2 - 1,
         )
+
+        # Left indicator area
+        indicator_rect = QRect(20, 10, 40, PILL_HEIGHT - 20)
         self._paint_indicator(p, indicator_rect)
 
         # Label
         p.setFont(self._font)
         p.setPen(QPen(TEXT_COLOR))
         label_rect = QRect(
-            indicator_rect.right() + 10, pill_rect.y(),
-            pill_rect.width() - indicator_rect.width() - 50, pill_rect.height(),
+            indicator_rect.right() + 10, 0,
+            PILL_WIDTH - indicator_rect.right() - 30, PILL_HEIGHT,
         )
         align = Qt.AlignmentFlag.AlignVCenter
         if self._status == "done":
             align |= Qt.AlignmentFlag.AlignLeft
             text = self._label_text or ""
-            # elide if too long
             metrics = p.fontMetrics()
             text = metrics.elidedText(text, Qt.TextElideMode.ElideRight, label_rect.width())
         else:
@@ -293,12 +260,10 @@ class PillWidget(QWidget):
             p.drawRoundedRect(int(x), int(y), bar_w, int(h), 2, 2)
 
     def _paint_dot(self, p, rect):
-        # Pulsing dot
-        import math
         pulse = 0.7 + 0.3 * math.sin(self._pulse_phase * math.tau)
-        size = int(12 * pulse)
+        size = max(4, int(12 * pulse))
         cx, cy = rect.center().x(), rect.center().y()
-        # Halo glow
+        # Halo
         glow = QColor(self._accent)
         glow.setAlpha(80)
         p.setPen(Qt.PenStyle.NoPen)
@@ -310,11 +275,9 @@ class PillWidget(QWidget):
 
     def _paint_check(self, p, rect):
         cx, cy = rect.center().x(), rect.center().y()
-        # Filled circle
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QBrush(self._accent))
         p.drawEllipse(cx - 12, cy - 12, 24, 24)
-        # Check mark
         pen = QPen(QColor(255, 255, 255), 2.5)
         pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
@@ -328,7 +291,7 @@ class PillWidget(QWidget):
 
 
 class RecordingOverlay:
-    """Thread-safe facade. Construct on the UI thread; call show/hide/set_level
+    """Thread-safe facade. Construct on UI thread; call show/hide/set_level
     from any thread."""
 
     def __init__(self, on_click=None):
